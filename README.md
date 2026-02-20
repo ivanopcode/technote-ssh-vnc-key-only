@@ -1,12 +1,12 @@
 # Technical Note: Remote Access via SSH Key-Only + VNC Tunnel on macOS Host
 
 ## Goal
-Use a hardened remote access model on the board host where SSH is key-only and VNC is reachable only through an SSH tunnel.
+Use a hardened remote access model on the target host where SSH is key-only and VNC is reachable only through an SSH tunnel.
 
 ## Problem Statement
 - Remote desktop became unreliable after switching auth methods.
 - Direct VNC access is not required on the public internet.
-- SSH must remain the single remote control control-plane for administration.
+- SSH must remain the single remote control-plane for administration.
 
 ## Target State
 1. SSH uses public key authentication only.
@@ -14,15 +14,31 @@ Use a hardened remote access model on the board host where SSH is key-only and V
 3. VNC sessions are opened through local port-forwarding (`ssh -L ...`).
 
 ## Server-Side SSH Configuration (macOS)
-Add the following to `/etc/ssh/sshd_config` or a drop-in in `/etc/ssh/sshd_config.d/`:
+To enforce key-only authentication, use these directives:
 
 ```conf
 PasswordAuthentication no
-ChallengeResponseAuthentication no
 KbdInteractiveAuthentication no
+ChallengeResponseAuthentication no
 PubkeyAuthentication yes
 AuthenticationMethods publickey
 PermitEmptyPasswords no
+PermitRootLogin no
+```
+
+*Older macOS versions may rely on `ChallengeResponseAuthentication` instead of or in addition to `KbdInteractiveAuthentication`.*
+
+**Where to apply this configuration:**
+
+- **Method A (recommended for modern macOS):** create a file in `/etc/ssh/sshd_config.d/` (for example, `100-custom-auth.conf`).
+  macOS updates often overwrite `/etc/ssh/sshd_config`, while included drop-ins usually remain.
+- **Method B (traditional):** edit `/private/etc/ssh/sshd_config` directly.
+  Recheck the file after major macOS upgrades.
+
+Restart SSH after edits:
+
+```bash
+sudo launchctl kickstart -k system/com.openssh.sshd
 ```
 
 ## Firewall/Services
@@ -45,32 +61,44 @@ ssh -N -L 5900:localhost:5900 relux
 3. Authenticate in VNC with the remote macOS user credentials.
 
 ## Helpful Validation Commands
-- Confirm SSH uses keys and rejects password prompts:
+
+### 1) Verify password login is rejected
 
 ```bash
-ssh -vvv -o PasswordAuthentication=no relux
+ssh -v \
+  -o PreferredAuthentications=password \
+  -o PubkeyAuthentication=no \
+  -o PasswordAuthentication=yes \
+  -o NumberOfPasswordPrompts=0 \
+  <user>@<macos-host-ip>
 ```
 
-- Confirm tunnel endpoint is alive:
+Expected result: `Permission denied (publickey).`
+
+### 2) Verify tunnel and service health
+
+Confirm tunnel endpoint is alive locally:
 
 ```bash
 nc -vz 127.0.0.1 5900
 ```
 
-- Confirm service health as needed:
+This confirms the tunnel endpoint is present; it does **not** verify remote VNC authentication.
+
+Confirm SSH reachability:
 
 ```bash
 nc -vz <remote-host> 22
 ```
 
 ## Why this Works
-- SSH auth is cryptographically bounded to keys, removing password brute-force and shared secret risk.
-- VNC traffic is encrypted inside SSH instead of exposed to LAN/WAN.
+- SSH auth is cryptographically bound to keys, removing password brute-force and shared-secret risks.
+- VNC traffic is encrypted inside SSH instead of being exposed to LAN/WAN.
 - Public attack surface is reduced by not exposing VNC ports.
 
 ## Notes
 - A prior SSH session like `ssh relux` confirming login only proves host-level SSH reachability.
-- If public VNC still appears reachable unexpectedly, firewall rules and cloud security-group / reverse-proxy ACLs should be rechecked.
+- If public VNC still appears reachable unexpectedly, check firewall rules and cloud security-group / reverse-proxy ACLs.
 - For long-running sessions use background tunnel mode:
 
 ```bash
